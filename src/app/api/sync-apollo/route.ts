@@ -27,6 +27,28 @@ type PeopleSearchResponse = {
   [key: string]: unknown;
 };
 
+type ApolloOrganization = {
+  name?: string;
+  primary_domain?: string;
+  website_url?: string;
+  linkedin_url?: string;
+  industry?: string;
+  estimated_num_employees?: number | string | null;
+  [key: string]: unknown;
+};
+
+type ApolloEmployment = {
+  id?: string;
+  _id?: string;
+  key?: string;
+  organization_name?: string;
+  title?: string;
+  start_date?: string;
+  end_date?: string;
+  current?: boolean | string;
+  [key: string]: unknown;
+};
+
 type BulkMatchPerson = {
   id: string;
   first_name?: string;
@@ -46,8 +68,8 @@ type BulkMatchPerson = {
   seniority?: string;
   departments?: string[];
   subdepartments?: string[];
-  employment_history?: unknown[];
-  organization?: unknown;
+  employment_history?: ApolloEmployment[];
+  organization?: ApolloOrganization;
   [key: string]: unknown;
 };
 
@@ -173,6 +195,7 @@ async function writeApolloFallbackSeed(input: {
   limit: number;
   titles: string[];
   locations: string[];
+  personName: string | null;
   requestUrl: string;
   searchData: PeopleSearchResponse;
   enrichData: BulkMatchResponse;
@@ -193,6 +216,7 @@ async function writeApolloFallbackSeed(input: {
       limit: input.limit,
       titles: input.titles,
       locations: input.locations,
+      person_name: input.personName,
       url: input.requestUrl,
     },
     apollo: {
@@ -219,12 +243,10 @@ async function writeApolloFallbackSeed(input: {
 
 async function ensureCompany(
   client: SupabaseClient,
-  org: unknown,
+  organization: ApolloOrganization | undefined,
   cache: Map<string, string>,
 ): Promise<string | null> {
-  if (!org || typeof org !== "object") return null;
-
-  const organization = org as Record<string, unknown>;
+  if (!organization) return null;
 
   const name = toStr(organization.name);
   const primaryDomain =
@@ -238,6 +260,11 @@ async function ensureCompany(
   const cached = cache.get(key);
   if (cached) return cached;
 
+  const employeeCount =
+    organization.estimated_num_employees != null
+      ? Number(organization.estimated_num_employees)
+      : null;
+
   if (primaryDomain) {
     const { data, error } = await client
       .from("companies")
@@ -248,10 +275,9 @@ async function ensureCompany(
           website_url: toStr(organization.website_url),
           linkedin_url: toStr(organization.linkedin_url),
           industry: toStr(organization.industry),
-          estimated_num_employees:
-            organization.estimated_num_employees != null
-              ? Number(organization.estimated_num_employees)
-              : null,
+          estimated_num_employees: Number.isFinite(employeeCount)
+            ? employeeCount
+            : null,
           raw: organization,
         },
         { onConflict: "primary_domain" },
@@ -288,10 +314,9 @@ async function ensureCompany(
       website_url: toStr(organization.website_url),
       linkedin_url: toStr(organization.linkedin_url),
       industry: toStr(organization.industry),
-      estimated_num_employees:
-        organization.estimated_num_employees != null
-          ? Number(organization.estimated_num_employees)
-          : null,
+      estimated_num_employees: Number.isFinite(employeeCount)
+        ? employeeCount
+        : null,
       raw: organization,
     })
     .select("id")
@@ -356,13 +381,11 @@ async function upsertCandidate(
 async function upsertEmployment(
   client: SupabaseClient,
   candidateId: string,
-  employment: unknown,
+  employment: ApolloEmployment,
   companyId: string | null,
 ): Promise<void> {
-  if (!employment || typeof employment !== "object") return;
-
-  const eh = employment as Record<string, unknown>;
-  const externalId = toStr(eh.id) ?? toStr(eh._id) ?? toStr(eh.key);
+  const externalId =
+    toStr(employment.id) ?? toStr(employment._id) ?? toStr(employment.key);
 
   if (!externalId) return;
 
@@ -370,13 +393,13 @@ async function upsertEmployment(
     {
       candidate_id: candidateId,
       company_id: companyId,
-      company_name: toStr(eh.organization_name),
-      title: toStr(eh.title),
-      start_date: toStr(eh.start_date),
-      end_date: toStr(eh.end_date),
-      current: eh.current === true || eh.current === "true",
+      company_name: toStr(employment.organization_name),
+      title: toStr(employment.title),
+      start_date: toStr(employment.start_date),
+      end_date: toStr(employment.end_date),
+      current: employment.current === true || employment.current === "true",
       external_id: externalId,
-      raw: eh,
+      raw: employment,
     },
     { onConflict: "candidate_id,external_id" },
   );
@@ -403,28 +426,6 @@ export async function POST(request: Request) {
         { status: 500 },
       );
     }
-
-    // const body = (await request.json()) as {
-    //   titles?: unknown;
-    //   locations?: unknown;
-    //   limit?: unknown;
-    //   page?: unknown;
-    // };
-
-    // const page = Math.max(1, Number(body.page ?? 1));
-    // const limit = Math.min(Math.max(Number(body.limit ?? 10), 1), 10);
-
-    // const requestedTitles = normalizeStringArray(body.titles);
-    // const requestedLocations = normalizeStringArray(body.locations);
-
-    // const titles =
-    //   requestedTitles.length > 0
-    //     ? [...new Set(requestedTitles)]
-    //     : DEFAULT_TITLES;
-    // const locations =
-    //   requestedLocations.length > 0
-    //     ? [...new Set(requestedLocations)]
-    //     : DEFAULT_LOCATIONS;
 
     const body = (await request.json()) as {
       titles?: unknown;
@@ -463,9 +464,9 @@ export async function POST(request: Request) {
       );
     }
 
-    if (isSinglePersonLookup && !personName) {
+    if (locations.length === 0) {
       return NextResponse.json(
-        { error: "Person name is required." },
+        { error: "At least one location must be provided." },
         { status: 400 },
       );
     }
@@ -475,17 +476,6 @@ export async function POST(request: Request) {
     const searchUrl = new URL(
       "https://api.apollo.io/api/v1/mixed_people/api_search",
     );
-
-    // for (const location of locations) {
-    //   searchUrl.searchParams.append("person_locations[]", location);
-    // }
-
-    // for (const title of titles) {
-    //   searchUrl.searchParams.append("person_titles[]", title);
-    // }
-
-    // searchUrl.searchParams.set("per_page", String(limit));
-    // searchUrl.searchParams.set("page", String(page));
 
     for (const location of locations) {
       searchUrl.searchParams.append("person_locations[]", location);
@@ -519,6 +509,10 @@ export async function POST(request: Request) {
         {
           error: "Apollo search failed.",
           details,
+          mode: isSinglePersonLookup
+            ? "single_person_lookup"
+            : "bulk_title_location_sync",
+          person_name: personName,
           page,
           limit,
           titles,
@@ -539,11 +533,16 @@ export async function POST(request: Request) {
       return NextResponse.json({
         ok: true,
         message: "No people returned by search.",
+        mode: isSinglePersonLookup
+          ? "single_person_lookup"
+          : "bulk_title_location_sync",
+        person_name: personName,
         page,
         limit,
         titles,
         locations,
         triggered_by: session.email,
+        credits_consumed: 0,
       });
     }
 
@@ -575,6 +574,10 @@ export async function POST(request: Request) {
         {
           error: "Failed to parse Apollo enrichment JSON.",
           raw: enrichText,
+          mode: isSinglePersonLookup
+            ? "single_person_lookup"
+            : "bulk_title_location_sync",
+          person_name: personName,
           page,
           limit,
           titles,
@@ -590,6 +593,10 @@ export async function POST(request: Request) {
         {
           error: "Apollo enrichment failed.",
           response: enrichData,
+          mode: isSinglePersonLookup
+            ? "single_person_lookup"
+            : "bulk_title_location_sync",
+          person_name: personName,
           page,
           limit,
           titles,
@@ -606,12 +613,16 @@ export async function POST(request: Request) {
       return NextResponse.json({
         ok: true,
         message: "Enrichment returned no matches.",
+        mode: isSinglePersonLookup
+          ? "single_person_lookup"
+          : "bulk_title_location_sync",
+        person_name: personName,
         page,
         limit,
         titles,
         locations,
         triggered_by: session.email,
-        credits_consumed: enrichData.credits_consumed,
+        credits_consumed: Number(enrichData.credits_consumed ?? 0),
       });
     }
 
@@ -640,6 +651,7 @@ export async function POST(request: Request) {
           person.organization,
           companyCache,
         );
+
         if (companyId) counters.companiesTouched++;
 
         failureContext = {
@@ -656,12 +668,12 @@ export async function POST(request: Request) {
           : [];
 
         for (const employment of history) {
-          if (!employment || typeof employment !== "object") continue;
-
-          const eh = employment as Record<string, unknown>;
           const employmentExternalId =
-            toStr(eh.id) ?? toStr(eh._id) ?? toStr(eh.key);
-          const employmentOrgName = toStr(eh.organization_name);
+            toStr(employment.id) ??
+            toStr(employment._id) ??
+            toStr(employment.key);
+
+          const employmentOrgName = toStr(employment.organization_name);
 
           failureContext = {
             stage: "upsert_employment",
@@ -682,6 +694,7 @@ export async function POST(request: Request) {
           limit,
           titles,
           locations,
+          personName,
           requestUrl: "/api/sync-apollo",
           searchData,
           enrichData,
@@ -704,7 +717,11 @@ export async function POST(request: Request) {
               candidates_upserted: counters.candidatesUpserted,
               employments_upserted: counters.employmentsUpserted,
             },
-            credits_consumed: enrichData.credits_consumed,
+            credits_consumed: Number(enrichData.credits_consumed ?? 0),
+            mode: isSinglePersonLookup
+              ? "single_person_lookup"
+              : "bulk_title_location_sync",
+            person_name: personName,
             page,
             limit,
             titles,
@@ -727,7 +744,11 @@ export async function POST(request: Request) {
               candidates_upserted: counters.candidatesUpserted,
               employments_upserted: counters.employmentsUpserted,
             },
-            credits_consumed: enrichData.credits_consumed,
+            credits_consumed: Number(enrichData.credits_consumed ?? 0),
+            mode: isSinglePersonLookup
+              ? "single_person_lookup"
+              : "bulk_title_location_sync",
+            person_name: personName,
             page,
             limit,
             titles,
