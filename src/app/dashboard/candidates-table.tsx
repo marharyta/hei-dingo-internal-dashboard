@@ -90,6 +90,7 @@ export function CandidatesTable() {
   }, [page, pageSize, total]);
 
   async function loadCandidates(nextPage = page) {
+    console.log("start loading...");
     setIsLoading(true);
     setErrorMessage(null);
 
@@ -130,10 +131,10 @@ export function CandidatesTable() {
     }
   }
 
-  //   useEffect(() => {
-  //     void loadCandidates(page);
-  //     // eslint-disable-next-line react-hooks/exhaustive-deps
-  //   }, [page, pageSize, query]);
+  // useEffect(() => {
+  //   void loadCandidates(page);
+  //   // eslint-disable-next-line react-hooks/exhaustive-deps
+  // }, [page, pageSize, query]);
 
   function submitSearch(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -142,6 +143,7 @@ export function CandidatesTable() {
   }
 
   useEffect(() => {
+    void loadCandidates(1);
     function refreshCandidates() {
       void loadCandidates(1);
       setPage(1);
